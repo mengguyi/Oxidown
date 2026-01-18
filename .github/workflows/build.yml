@@ -1,0 +1,270 @@
+name: Build and Release
+
+on:
+  push:
+    branches: ["**"]
+    tags:
+      - "v*"
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: Build (${{ matrix.target }})
+    # If it's a tag push, wait for release creation. Otherwise (PR/push), just run.
+    needs: create-release
+    if: always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: arm-unknown-linux-gnueabi
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: arm-unknown-linux-gnueabihf
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: loongarch64-unknown-linux-gnu
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: loongarch64-unknown-linux-musl
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: powerpc-unknown-linux-gnu
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: powerpc64-unknown-linux-gnu
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: riscv64gc-unknown-linux-gnu
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: s390x-unknown-linux-gnu
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-freebsd
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use_cross: false
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-netbsd
+            use_cross: true
+
+          - os: windows-latest
+            target: aarch64-pc-windows-gnullvm
+            use_cross: false
+
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            use_cross: false
+
+          - os: windows-latest
+            target: i686-pc-windows-gnu
+            use_cross: false
+
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            use_cross: false
+
+          - os: windows-latest
+            target: x86_64-pc-windows-gnu
+            use_cross: false
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            use_cross: false
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            use_cross: false
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            use_cross: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
+      # Install llvm-mingw toolchain for aarch64-pc-windows-gnullvm builds
+      - name: Install llvm-mingw (aarch64 gnullvm)
+        if: matrix.target == 'aarch64-pc-windows-gnullvm'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $versions = @("20251216", "20251202", "20251118")
+          $downloaded = $false
+          foreach ($v in $versions) {
+            $Archive = "llvm-mingw-$v-ucrt-x86_64.zip"
+            $Url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$v/$Archive"
+            Write-Host "Attempting to download llvm-mingw version $v from $Url"
+            try {
+              Invoke-WebRequest -Uri $Url -OutFile "$Archive" -UseBasicParsing
+              $downloaded = $true
+              $Version = $v
+              break
+            } catch {
+              Write-Host "Download failed for version ${v}: $_"
+            }
+          }
+          if (-not $downloaded) {
+            throw "Unable to download llvm-mingw toolchain"
+          }
+          Expand-Archive "$Archive" -DestinationPath "$env:USERPROFILE/llvm-mingw" -Force
+          $Root = Get-ChildItem "$env:USERPROFILE/llvm-mingw" -Directory | Select-Object -First 1
+          $Bin = Join-Path $Root.FullName "bin"
+          $Bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CC_aarch64_pc_windows_gnullvm=aarch64-w64-mingw32-clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX_aarch64_pc_windows_gnullvm=aarch64-w64-mingw32-clang++" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AR_aarch64_pc_windows_gnullvm=aarch64-w64-mingw32-ar" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_LINKER=aarch64-w64-mingw32-clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_AR=aarch64-w64-mingw32-ar" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify llvm-mingw (aarch64 gnullvm)
+        if: matrix.target == 'aarch64-pc-windows-gnullvm'
+        run: |
+          where aarch64-w64-mingw32-clang
+          aarch64-w64-mingw32-clang --version
+
+      # Ensure 32-bit MinGW toolchain is available for i686-pc-windows-gnu builds
+      - name: Install MinGW-w64 (i686)
+        if: matrix.target == 'i686-pc-windows-gnu'
+        uses: egor-tensin/setup-mingw@v3
+        with:
+          platform: x86
+
+      - name: Configure MinGW-w64 (i686)
+        if: matrix.target == 'i686-pc-windows-gnu'
+        shell: bash
+        run: |
+          echo "CC=gcc" >> "$GITHUB_ENV"
+          echo "CXX=g++" >> "$GITHUB_ENV"
+          echo "AR=ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER=gcc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_I686_PC_WINDOWS_GNU_AR=ar" >> "$GITHUB_ENV"
+
+      - name: Verify MinGW-w64 (i686)
+        if: matrix.target == 'i686-pc-windows-gnu'
+        run: |
+          where i686-w64-mingw32-gcc
+          i686-w64-mingw32-gcc --version
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      # For non-release builds (PRs, pushes), build and upload artifacts
+      - name: Build (native)
+        if: matrix.use_cross == false && !startsWith(github.ref, 'refs/tags/v')
+        run: cargo build --verbose --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.use_cross == true && !startsWith(github.ref, 'refs/tags/v')
+        run: cross build --verbose --release --target ${{ matrix.target }}
+
+      - name: Upload Build Artifact
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v6
+        with:
+          name: oxidown-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/oxidown
+            target/${{ matrix.target }}/release/oxidown.exe
+          if-no-files-found: ignore
+
+      # For release builds (tags), use taiki-e/upload-rust-binary-action
+      # This action handles building (using cross if needed), packaging (zip/tar.gz), and uploading.
+      - name: Upload Binary (Release)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: oxidown
+          target: ${{ matrix.target }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Note: This action automatically uses 'cross' if it detects it's needed or installed.
+
+  lint:
+    name: Lint and Format Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
